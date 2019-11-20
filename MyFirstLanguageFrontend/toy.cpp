@@ -203,6 +203,18 @@ namespace {
         Value *codegen() override;
     };
 
+/// UnaryExprAST - Expression class for a unary operator.
+    class UnaryExprAST : public ExprAST {
+        char Opcode;
+        std::unique_ptr<ExprAST> Operand;
+
+    public:
+        UnaryExprAST(char Opcode, std::unique_ptr<ExprAST> Operand)
+            : Opcode(Opcode), Operand(std::move(Operand)) {}
+
+        Value *codegen() override;
+    };
+
 /// CallExprAST - Expression class for function calls.
     class CallExprAST : public ExprAST {
         std::string Callee;
@@ -452,8 +464,24 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
     }
 }
 
+/// unary
+/// ::= primary
+/// ::= '!' unary
+static std::unique_ptr<ExprAST> ParseUnary() {
+    // If the current token is not an operator, it must be a primary expr.
+    if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
+        return ParsePrimary();
+
+    // If this is a unary operator, read it.
+    int Opc = CurTok;
+    getNextToken();
+    if (auto Operand = ParseUnary())
+        return std::make_unique<UnaryExprAST>(Opc, std::move(Operand));
+    return nullptr;
+}
+
 /// binoprhs
-///   ::= ('+' primary)*
+///   ::= ('+' unary)*
 static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
                                               std::unique_ptr<ExprAST> LHS) {
     // If this is a binop, find its precedence.
@@ -469,8 +497,8 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
         int BinOp = CurTok;
         getNextToken(); // eat binop
 
-        // Parse the primary expression after the binary operator.
-        auto RHS = ParsePrimary();
+        // Parse the unary expression after the binary operator.
+        auto RHS = ParseUnary();
         if (!RHS)
             return nullptr;
 
@@ -493,7 +521,7 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
 ///   ::= primary binoprhs
 ///
 static std::unique_ptr<ExprAST> ParseExpression() {
-    auto LHS = ParsePrimary();
+    auto LHS = ParseUnary();
     if (!LHS)
         return nullptr;
 
@@ -503,6 +531,7 @@ static std::unique_ptr<ExprAST> ParseExpression() {
 /// prototype
 ///   ::= id '(' id* ')'
 ///   ::= binary LETTER number? (id, id)
+///   ::= unary LETTER (id)
 static std::unique_ptr<PrototypeAST> ParsePrototype() {
     std::string FnName;
 
@@ -515,6 +544,15 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     case tok_identifier:
         FnName = IdentifierStr;
         Kind = 0;
+        getNextToken();
+        break;
+    case tok_unary:
+        getNextToken();
+        if (!isascii(CurTok))
+            return LogErrorP("Expected unary operator");
+        FnName = "unary";
+        FnName += (char)CurTok;
+        Kind = 1;
         getNextToken();
         break;
     case tok_binary:
@@ -681,6 +719,18 @@ Value *BinaryExprAST::codegen() {
 
     Value *Ops[2] = { L, R };
     return Builder.CreateCall(F, Ops, "binop");
+}
+
+Value *UnaryExprAST::codegen() {
+    Value *OperandV = Operand->codegen();
+    if (!OperandV)
+        return nullptr;
+
+    Function *F = getFunction(std::string("unary") + Opcode);
+    if (!F)
+        return LogErrorV("Unkonwn unary operator");
+
+    return Builder.CreateCall(F, OperandV, "unop");
 }
 
 Value *CallExprAST::codegen() {
@@ -996,6 +1046,27 @@ static void MainLoop() {
     }
 }
 
+//===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+  fputc((char)X, stderr);
+  return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X) {
+  fprintf(stderr, "%f\n", X);
+  return 0;
+}
 
 //===----------------------------------------------------------------------===//
 // Main driver code.
